@@ -172,3 +172,45 @@ def test_url_ingestion_end_to_end(
     doc = Document.objects.get(id=resp.json()["document_id"])
     assert doc.status == Document.Status.INDEXED
     assert DocumentChunk.objects.filter(document=doc).count() == 1
+
+
+@pytest.mark.django_db
+def test_local_temp_dir_storage_processing_and_cleanup(
+    client: Client,
+    topic_a: Topic,
+    auth_headers_a: dict[str, str],
+    mock_litellm: dict[str, Any],
+    settings: Any,
+    tmp_path: Any,
+) -> None:
+    from django.core.files.storage import default_storage
+
+    settings.USE_S3_STORAGE = False
+    settings.CLEANUP_TEMP_FILES_AFTER_PROCESSING = True
+    settings.STORAGES = {
+        "default": {
+            "BACKEND": "django.core.files.storage.FileSystemStorage",
+            "OPTIONS": {"location": str(tmp_path)},
+        },
+        "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+    }
+
+    # 1. Indexed doc processes from temp dir and cleans up both raw + normalized temp files
+    f1 = SimpleUploadedFile("temp_ok.md", b"# Security\nTemp dir processing test.", content_type="text/markdown")
+    resp = client.post(f"/api/v1/topics/{topic_a.id}/documents/upload", data={"file": f1}, **auth_headers_a)
+    assert resp.status_code == 202
+    doc = Document.objects.get(id=resp.json()["document_id"])
+    assert doc.status == Document.Status.INDEXED
+    assert not default_storage.exists(doc.raw_storage_key)
+    assert not default_storage.exists(doc.normalized_storage_key)
+
+    # 2. Quarantined doc cleans up raw file after parsing, but keeps normalized.md for HITL resolution
+    mock_litellm["gate_response"] = {"is_on_topic": False, "confidence_score": 0.2, "rationale": "Off topic"}
+    f2 = SimpleUploadedFile("temp_q.md", b"# Off Topic\nKeep normalized until resolved.", content_type="text/markdown")
+    resp_q = client.post(f"/api/v1/topics/{topic_a.id}/documents/upload", data={"file": f2}, **auth_headers_a)
+    assert resp_q.status_code == 202
+    q_doc = Document.objects.get(id=resp_q.json()["document_id"])
+    assert q_doc.status == Document.Status.QUARANTINED
+    assert not default_storage.exists(q_doc.raw_storage_key)
+    assert default_storage.exists(q_doc.normalized_storage_key)
+

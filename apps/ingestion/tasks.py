@@ -12,7 +12,7 @@ from django.db import transaction
 from apps.ingestion.chunkers import chunk_markdown
 from apps.ingestion.models import Document, DocumentChunk
 from apps.ingestion.parsers import parse_file_to_markdown, parse_url_to_markdown
-from apps.ingestion.storage import read_bytes, read_text, save_text
+from apps.ingestion.storage import cleanup_temp_files, get_local_path, read_bytes, read_text, save_text
 from apps.llm_gateway.client import llm_gateway
 from apps.llm_gateway.models import LLMUsageLog
 from apps.llm_gateway.prompts import (
@@ -59,13 +59,19 @@ def parse_document_task(self: Any, document_id: str) -> str:
         if doc.source_type == Document.SourceType.URL:
             markdown_text = parse_url_to_markdown(doc.source_uri)
         else:
-            raw_bytes = read_bytes(doc.raw_storage_key)
-            markdown_text = parse_file_to_markdown(doc.source_uri, raw_bytes)
+            local_path = get_local_path(doc.raw_storage_key)
+            if local_path is not None:
+                markdown_text = parse_file_to_markdown(doc.source_uri, file_path=local_path)
+            else:
+                raw_bytes = read_bytes(doc.raw_storage_key)
+                markdown_text = parse_file_to_markdown(doc.source_uri, content=raw_bytes)
 
         normalized_key = f"tenants/{doc.tenant_id}/topics/{doc.topic_id}/documents/{doc.id}/normalized.md"
         saved_key = save_text(normalized_key, markdown_text)
         doc.normalized_storage_key = saved_key
         doc.save(update_fields=["normalized_storage_key", "updated_at"])
+        # Raw temp file is no longer needed once normalized Markdown is written
+        cleanup_temp_files(doc.raw_storage_key)
         return str(doc.id)
     except Exception as exc:
         doc.status = Document.Status.FAILED
@@ -182,6 +188,7 @@ def validate_and_extract_task(self: Any, document_id: str | None) -> str | None:
                 "updated_at",
             ]
         )
+        cleanup_temp_files(doc.raw_storage_key, doc.normalized_storage_key)
         return None
 
     # Quarantine flow: optionally suggest alternative topics on semantic mismatch
@@ -277,4 +284,5 @@ def index_document_task(self: Any, document_id: str | None) -> str | None:
         doc.status = Document.Status.INDEXED
         doc.save(update_fields=["status", "updated_at"])
 
+    cleanup_temp_files(doc.raw_storage_key, doc.normalized_storage_key)
     return str(doc.id)

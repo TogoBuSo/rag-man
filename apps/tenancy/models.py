@@ -87,7 +87,7 @@ class TenantProviderConfig(models.Model):
     def __str__(self) -> str:
         return f"ProviderConfig({self.tenant.slug})"
 
-    def get_api_keys(self) -> dict[str, str]:
+    def get_api_keys(self) -> dict[str, Any]:
         if not self.encrypted_api_keys:
             return {}
         try:
@@ -96,5 +96,19 @@ class TenantProviderConfig(models.Model):
         except json.JSONDecodeError:
             return {}
 
-    def set_api_keys(self, keys: dict[str, str]) -> None:
+    def set_api_keys(self, keys: dict[str, Any]) -> None:
         self.encrypted_api_keys = json.dumps(keys)
+
+    def get_provider_settings(self, provider: str) -> dict[str, Any]:
+        """Return normalized provider settings (api_key, api_base, basic_auth, extra_headers)."""
+        raw = self.get_api_keys().get(provider)
+        if isinstance(raw, str):
+            return {"api_key": raw}
+        if isinstance(raw, dict):
+            return dict(raw)
+        return {}
+
+    def set_provider_settings(self, provider: str, provider_settings: dict[str, Any]) -> None:
+        all_settings = self.get_api_keys()
+        all_settings[provider] = provider_settings
+        self.set_api_keys(all_settings)

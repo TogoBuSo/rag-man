@@ -9,6 +9,7 @@ from django.utils import timezone
 from ninja.errors import HttpError
 
 from apps.ingestion.models import Document
+from apps.ingestion.storage import cleanup_temp_files
 from apps.ingestion.tasks import dispatch_index_only, dispatch_validation_and_index
 from apps.quarantine.models import QuarantineReview
 from apps.quarantine.schemas import QuarantineResolveIn, QuarantineReviewOut
@@ -115,6 +116,7 @@ def resolve_quarantine_review(
             review.resolution_notes = payload.resolution_notes
             review.resolved_at = now
             review.save(update_fields=["resolution", "resolution_notes", "resolved_at", "updated_at"])
+        cleanup_temp_files(doc.raw_storage_key, doc.normalized_storage_key)
 
     review.refresh_from_db()
     return _to_out(review)

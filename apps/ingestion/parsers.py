@@ -88,13 +88,29 @@ def parse_url_to_markdown(url: str) -> str:
     raise SSRFBlockedError("Exceeded maximum redirect hops.")
 
 
-def parse_file_to_markdown(filename: str, content: bytes) -> str:
+def parse_file_to_markdown(
+    filename: str,
+    content: bytes | None = None,
+    file_path: Path | None = None,
+) -> str:
     suffix = Path(filename).suffix.lower()
+
+    if file_path is not None and file_path.exists():
+        if suffix in (".md", ".markdown", ".txt"):
+            return file_path.read_text(encoding="utf-8", errors="replace").strip()
+        md = MarkItDown()
+        result = md.convert(str(file_path))
+        text = getattr(result, "text_content", "") or ""
+        if text.strip():
+            return text.strip()
+        return file_path.read_text(encoding="utf-8", errors="replace").strip()
+
+    raw = content or b""
     if suffix in (".md", ".markdown", ".txt"):
-        return content.decode("utf-8", errors="replace").strip()
+        return raw.decode("utf-8", errors="replace").strip()
 
     with tempfile.NamedTemporaryFile(suffix=suffix or ".bin", delete=True) as tmp:
-        tmp.write(content)
+        tmp.write(raw)
         tmp.flush()
         md = MarkItDown()
         result = md.convert(tmp.name)
@@ -102,4 +118,4 @@ def parse_file_to_markdown(filename: str, content: bytes) -> str:
         if text.strip():
             return text.strip()
 
-    return content.decode("utf-8", errors="replace").strip()
+    return raw.decode("utf-8", errors="replace").strip()

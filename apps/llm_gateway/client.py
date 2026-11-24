@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from collections.abc import Iterator
@@ -18,7 +19,14 @@ logger = logging.getLogger(__name__)
 
 def _infer_provider(model: str) -> str:
     if "/" in model:
-        return model.split("/", 1)[0].lower()
+        prefix = model.split("/", 1)[0].lower()
+        if prefix in ("ollama", "ollama_chat"):
+            return "ollama"
+        if prefix in ("openai_compatible", "openai-compatible"):
+            return "openai_compatible"
+        if prefix == "edenai":
+            return "edenai"
+        return prefix
     lower = model.lower()
     if lower.startswith(("claude",)):
         return "anthropic"
@@ -27,6 +35,25 @@ def _infer_provider(model: str) -> str:
     if lower.startswith(("command", "rerank")):
         return "cohere"
     return "openai"
+
+
+def _normalize_litellm_model(model: str, provider: str) -> str:
+    """Translate custom provider prefixes (e.g. openai_compatible/<model>) to LiteLLM format."""
+    if provider == "openai_compatible" and "/" in model:
+        _, target_model = model.split("/", 1)
+        return f"openai/{target_model}"
+    return model
+
+
+def _build_basic_auth_header(basic_auth: dict[str, Any] | None) -> str | None:
+    if not isinstance(basic_auth, dict):
+        return None
+    username = str(basic_auth.get("username") or "").strip()
+    password = str(basic_auth.get("password") or "")
+    if not username:
+        return None
+    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    return f"Basic {token}"
 
 
 def resolve_model(tenant: Tenant, topic: Topic | None, role: str) -> str:
@@ -59,14 +86,68 @@ def resolve_model(tenant: Tenant, topic: Topic | None, role: str) -> str:
     raise ValueError(f"Unsupported LLM role: {role}")
 
 
-def resolve_api_key(tenant: Tenant, model: str) -> str | None:
-    try:
-        provider_config = tenant.provider_config
-    except TenantProviderConfig.DoesNotExist:
-        return None
-    keys = provider_config.get_api_keys()
+def resolve_provider_kwargs(
+    tenant: Tenant, model: str, role: str = "extraction"
+) -> tuple[str, dict[str, Any]]:
+    """Resolve LiteLLM model string and provider kwargs (api_key, api_base, extra_headers)."""
     provider = _infer_provider(model)
-    return keys.get(provider) or keys.get(model) or None
+    litellm_model = _normalize_litellm_model(model, provider)
+
+    # 1. Start with system-level defaults from settings.LLM_PROVIDERS
+    sys_providers: dict[str, Any] = getattr(settings, "LLM_PROVIDERS", {})
+    merged: dict[str, Any] = {}
+    if provider in sys_providers and isinstance(sys_providers[provider], dict):
+        merged.update(sys_providers[provider])
+
+    # Embedding-specific system overrides (for OpenAI-compatible / Eden AI / Ollama embeddings)
+    if role == "embedding":
+        embed_base = getattr(settings, "DEFAULT_EMBEDDING_API_BASE", "")
+        embed_key = getattr(settings, "DEFAULT_EMBEDDING_API_KEY", "")
+        if embed_base:
+            merged["api_base"] = embed_base
+        if embed_key:
+            merged["api_key"] = embed_key
+
+    # 2. Overlay tenant BYOK encrypted settings (not overriding system embedding lock unless unset)
+    if role != "embedding":
+        try:
+            tenant_cfg = tenant.provider_config
+        except TenantProviderConfig.DoesNotExist:
+            tenant_cfg = None
+        if tenant_cfg is not None:
+            for lookup_key in (provider, model):
+                override = tenant_cfg.get_provider_settings(lookup_key)
+                if override:
+                    for k, v in override.items():
+                        if v:
+                            merged[k] = v
+
+    kwargs: dict[str, Any] = {}
+    api_key = str(merged.get("api_key") or "").strip()
+    api_base = str(merged.get("api_base") or "").strip()
+    if api_key:
+        kwargs["api_key"] = api_key
+    if api_base:
+        kwargs["api_base"] = api_base
+
+    headers: dict[str, str] = {}
+    raw_headers = merged.get("extra_headers")
+    if isinstance(raw_headers, dict):
+        headers.update({str(k): str(v) for k, v in raw_headers.items()})
+
+    basic_header = _build_basic_auth_header(merged.get("basic_auth"))
+    if basic_header and "Authorization" not in headers:
+        headers["Authorization"] = basic_header
+
+    if headers:
+        kwargs["extra_headers"] = headers
+
+    return litellm_model, kwargs
+
+
+def resolve_api_key(tenant: Tenant, model: str) -> str | None:
+    _, kwargs = resolve_provider_kwargs(tenant, model)
+    return kwargs.get("api_key")
 
 
 def _extract_usage(response: Any) -> tuple[int, int]:
@@ -133,7 +214,7 @@ def _parse_json_content(raw_text: str) -> dict[str, Any]:
 
 
 class LLMGatewayClient:
-    """Centralized LiteLLM wrapper with BYOK resolution and usage logging."""
+    """Centralized LiteLLM wrapper with BYOK, OpenAI-compatible, Eden AI, and Ollama Basic Auth support."""
 
     def complete_json(
         self,
@@ -145,16 +226,15 @@ class LLMGatewayClient:
         role: str = "extraction",
         response_schema: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        model = resolve_model(tenant, topic, role)
-        api_key = resolve_api_key(tenant, model)
+        configured_model = resolve_model(tenant, topic, role)
+        litellm_model, provider_kwargs = resolve_provider_kwargs(tenant, configured_model, role=role)
         kwargs: dict[str, Any] = {
-            "model": model,
+            "model": litellm_model,
             "messages": messages,
             "temperature": 0.0,
             "response_format": {"type": "json_object"},
+            **provider_kwargs,
         }
-        if api_key:
-            kwargs["api_key"] = api_key
         if response_schema:
             kwargs["extra_body"] = {"metadata_schema": response_schema}
 
@@ -164,7 +244,7 @@ class LLMGatewayClient:
             tenant=tenant,
             topic=topic,
             operation=operation,
-            model=model,
+            model=configured_model,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             estimated_cost_usd=_estimate_cost(response),
@@ -180,15 +260,14 @@ class LLMGatewayClient:
         messages: list[dict[str, str]],
         role: str = "synthesis",
     ) -> str:
-        model = resolve_model(tenant, topic, role)
-        api_key = resolve_api_key(tenant, model)
+        configured_model = resolve_model(tenant, topic, role)
+        litellm_model, provider_kwargs = resolve_provider_kwargs(tenant, configured_model, role=role)
         kwargs: dict[str, Any] = {
-            "model": model,
+            "model": litellm_model,
             "messages": messages,
             "temperature": 0.1,
+            **provider_kwargs,
         }
-        if api_key:
-            kwargs["api_key"] = api_key
 
         response = litellm.completion(**kwargs)
         prompt_tokens, completion_tokens = _extract_usage(response)
@@ -196,7 +275,7 @@ class LLMGatewayClient:
             tenant=tenant,
             topic=topic,
             operation=operation,
-            model=model,
+            model=configured_model,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             estimated_cost_usd=_estimate_cost(response),
@@ -212,16 +291,15 @@ class LLMGatewayClient:
         messages: list[dict[str, str]],
         role: str = "synthesis",
     ) -> Iterator[str]:
-        model = resolve_model(tenant, topic, role)
-        api_key = resolve_api_key(tenant, model)
+        configured_model = resolve_model(tenant, topic, role)
+        litellm_model, provider_kwargs = resolve_provider_kwargs(tenant, configured_model, role=role)
         kwargs: dict[str, Any] = {
-            "model": model,
+            "model": litellm_model,
             "messages": messages,
             "temperature": 0.1,
             "stream": True,
+            **provider_kwargs,
         }
-        if api_key:
-            kwargs["api_key"] = api_key
 
         stream = litellm.completion(**kwargs)
         emitted_tokens = 0
@@ -244,7 +322,7 @@ class LLMGatewayClient:
             tenant=tenant,
             topic=topic,
             operation=operation,
-            model=model,
+            model=configured_model,
             prompt_tokens=0,
             completion_tokens=emitted_tokens,
             estimated_cost_usd=Decimal("0"),
@@ -259,14 +337,17 @@ class LLMGatewayClient:
     ) -> list[list[float]]:
         if not texts:
             return []
-        model = resolve_model(tenant, topic, "embedding")
-        response = litellm.embedding(model=model, input=texts)
+        configured_model = resolve_model(tenant, topic, "embedding")
+        litellm_model, provider_kwargs = resolve_provider_kwargs(
+            tenant, configured_model, role="embedding"
+        )
+        response = litellm.embedding(model=litellm_model, input=texts, **provider_kwargs)
         prompt_tokens, _ = _extract_usage(response)
         _log_usage(
             tenant=tenant,
             topic=topic,
             operation=LLMUsageLog.Operation.EMBEDDING,
-            model=model,
+            model=configured_model,
             prompt_tokens=prompt_tokens,
             completion_tokens=0,
             estimated_cost_usd=Decimal("0"),
@@ -293,23 +374,22 @@ class LLMGatewayClient:
     ) -> list[tuple[int, float]]:
         if not documents:
             return []
-        model = resolve_model(tenant, topic, "rerank")
-        api_key = resolve_api_key(tenant, model)
+        configured_model = resolve_model(tenant, topic, "rerank")
+        litellm_model, provider_kwargs = resolve_provider_kwargs(tenant, configured_model, role="rerank")
         kwargs: dict[str, Any] = {
-            "model": model,
+            "model": litellm_model,
             "query": query,
             "documents": documents,
             "top_n": top_n,
+            **provider_kwargs,
         }
-        if api_key:
-            kwargs["api_key"] = api_key
 
         response = litellm.rerank(**kwargs)
         _log_usage(
             tenant=tenant,
             topic=topic,
             operation=LLMUsageLog.Operation.RERANK,
-            model=model,
+            model=configured_model,
         )
         results = response["results"] if isinstance(response, dict) else response.results
         ranked: list[tuple[int, float]] = []

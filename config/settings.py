@@ -1,19 +1,35 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
 
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "django-insecure-rag-man-dev-key")
-DEBUG = os.environ.get("DJANGO_DEBUG", "true").lower() in ("1", "true", "yes")
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "django-insecure-dev-only-set-in-env")
+DEBUG = os.environ.get("DJANGO_DEBUG", "false").lower() in ("1", "true", "yes")
 ALLOWED_HOSTS = [
     h.strip()
-    for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",")
+    for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
     if h.strip()
 ]
+
+CSRF_TRUSTED_ORIGINS = [
+    o.strip()
+    for o in os.environ.get(
+        "DJANGO_CSRF_TRUSTED_ORIGINS",
+        "http://localhost:8085,http://127.0.0.1:8085",
+    ).split(",")
+    if o.strip()
+]
+
+USE_X_FORWARDED_HOST = True
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -24,7 +40,6 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "django.contrib.postgres",
     "pgvector.django",
-    "storages",
     "apps.tenancy",
     "apps.topics",
     "apps.ingestion",
@@ -35,6 +50,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "config.middleware.SimpleCORSMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -95,17 +111,25 @@ FIELD_ENCRYPTION_KEY = os.environ.get(
     "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
 )
 
-# Storage (S3 / MinIO or local filesystem fallback)
+# Storage: primary mechanism is local temp directory on the webserver; AWS S3 is optional
 USE_S3_STORAGE = os.environ.get("USE_S3_STORAGE", "false").lower() in ("1", "true", "yes")
+LOCAL_STORAGE_TEMP_DIR = Path(
+    os.environ.get("LOCAL_STORAGE_TEMP_DIR", str(Path(tempfile.gettempdir()) / "rag_man_uploads"))
+)
+CLEANUP_TEMP_FILES_AFTER_PROCESSING = os.environ.get(
+    "CLEANUP_TEMP_FILES_AFTER_PROCESSING", "true"
+).lower() in ("1", "true", "yes")
+
 if USE_S3_STORAGE:
+    INSTALLED_APPS.append("storages")
     STORAGES = {
         "default": {
             "BACKEND": "storages.backends.s3.S3Storage",
             "OPTIONS": {
-                "access_key": os.environ.get("AWS_ACCESS_KEY_ID", "minioadmin"),
-                "secret_key": os.environ.get("AWS_SECRET_ACCESS_KEY", "minioadmin"),
-                "bucket_name": os.environ.get("AWS_STORAGE_BUCKET_NAME", "rag-documents"),
-                "endpoint_url": os.environ.get("AWS_S3_ENDPOINT_URL", "http://127.0.0.1:9000"),
+                "access_key": os.environ.get("AWS_ACCESS_KEY_ID", ""),
+                "secret_key": os.environ.get("AWS_SECRET_ACCESS_KEY", ""),
+                "bucket_name": os.environ.get("AWS_STORAGE_BUCKET_NAME", ""),
+                "endpoint_url": os.environ.get("AWS_S3_ENDPOINT_URL") or None,
                 "region_name": os.environ.get("AWS_S3_REGION_NAME", "us-east-1"),
                 "file_overwrite": True,
                 "default_acl": None,
@@ -117,11 +141,12 @@ if USE_S3_STORAGE:
         },
     }
 else:
+    LOCAL_STORAGE_TEMP_DIR.mkdir(parents=True, exist_ok=True)
     STORAGES = {
         "default": {
             "BACKEND": "django.core.files.storage.FileSystemStorage",
             "OPTIONS": {
-                "location": str(BASE_DIR / "media"),
+                "location": str(LOCAL_STORAGE_TEMP_DIR),
             },
         },
         "staticfiles": {
@@ -146,6 +171,27 @@ CELERY_TASK_ALWAYS_EAGER = os.environ.get("CELERY_TASK_ALWAYS_EAGER", "false").l
 # LiteLLM & Uniform Embedding Lock
 DEFAULT_EMBEDDING_MODEL = os.environ.get("DEFAULT_EMBEDDING_MODEL", "text-embedding-3-small")
 DEFAULT_EMBEDDING_DIMENSIONS = int(os.environ.get("DEFAULT_EMBEDDING_DIMENSIONS", "1536"))
+DEFAULT_EMBEDDING_API_BASE = os.environ.get("DEFAULT_EMBEDDING_API_BASE", "")
+DEFAULT_EMBEDDING_API_KEY = os.environ.get("DEFAULT_EMBEDDING_API_KEY", "")
 DEFAULT_EXTRACTION_MODEL = os.environ.get("DEFAULT_EXTRACTION_MODEL", "gpt-4o-mini")
 DEFAULT_SYNTHESIS_MODEL = os.environ.get("DEFAULT_SYNTHESIS_MODEL", "gpt-4o-mini")
 DEFAULT_RERANK_MODEL = os.environ.get("DEFAULT_RERANK_MODEL", "cohere/rerank-english-v3.0")
+
+# Optional provider defaults (set real keys/endpoints in .env only)
+LLM_PROVIDERS = {
+    "openai_compatible": {
+        "api_base": os.environ.get("OPENAI_COMPATIBLE_API_BASE", ""),
+        "api_key": os.environ.get("OPENAI_COMPATIBLE_API_KEY", ""),
+    },
+    "edenai": {
+        "api_base": os.environ.get("EDENAI_API_BASE", "https://api.edenai.run/v2/llm"),
+        "api_key": os.environ.get("EDENAI_API_KEY", ""),
+    },
+    "ollama": {
+        "api_base": os.environ.get("OLLAMA_API_BASE", ""),
+        "basic_auth": {
+            "username": os.environ.get("OLLAMA_BASIC_AUTH_USERNAME", ""),
+            "password": os.environ.get("OLLAMA_BASIC_AUTH_PASSWORD", ""),
+        },
+    },
+}

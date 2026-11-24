@@ -4,7 +4,7 @@ from typing import Any
 from uuid import UUID
 
 import jsonschema
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404
 from ninja.errors import HttpError
 
@@ -25,21 +25,22 @@ def validate_json_schema(schema: dict[str, Any]) -> None:
 def create_topic(tenant: Tenant, payload: TopicCreateIn) -> Topic:
     validate_json_schema(payload.metadata_schema)
     try:
-        return Topic.objects.create(
-            tenant=tenant,
-            slug=payload.slug,
-            name=payload.name,
-            system_description=payload.system_description,
-            glossary=payload.glossary,
-            semantic_rules=payload.semantic_rules,
-            min_semantic_score=payload.min_semantic_score,
-            metadata_schema=payload.metadata_schema,
-            failure_policy=payload.failure_policy,
-            chunking_config=payload.chunking_config or default_chunking_config(),
-            synthesis_prompt=payload.synthesis_prompt,
-            extraction_model=payload.extraction_model,
-            synthesis_model=payload.synthesis_model,
-        )
+        with transaction.atomic():
+            return Topic.objects.create(
+                tenant=tenant,
+                slug=payload.slug,
+                name=payload.name,
+                system_description=payload.system_description,
+                glossary=payload.glossary,
+                semantic_rules=payload.semantic_rules,
+                min_semantic_score=payload.min_semantic_score,
+                metadata_schema=payload.metadata_schema,
+                failure_policy=payload.failure_policy,
+                chunking_config=payload.chunking_config or default_chunking_config(),
+                synthesis_prompt=payload.synthesis_prompt,
+                extraction_model=payload.extraction_model,
+                synthesis_model=payload.synthesis_model,
+            )
     except IntegrityError as exc:
         raise HttpError(409, f"Topic with slug '{payload.slug}' already exists for this tenant.") from exc
 
