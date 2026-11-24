@@ -123,3 +123,63 @@ def test_ollama_provider_with_basic_auth_headers(
     assert captured["model"] == "ollama_chat/llama3.2"
     assert captured["api_base"] == "https://ollama.internal.example"
     assert captured["extra_headers"]["Authorization"] == f"Basic {expected_token}"
+
+
+@pytest.mark.django_db
+def test_provider_config_admin_form_saves_and_preserves_secrets(
+    tenant_a: tuple[Tenant, str],
+) -> None:
+    from apps.tenancy.admin import TenantProviderConfigAdminForm
+
+    tenant = tenant_a[0]
+    form = TenantProviderConfigAdminForm(
+        data={
+            "tenant": str(tenant.id),
+            "default_extraction_model": "edenai/openai/gpt-4o-mini",
+            "default_synthesis_model": "ollama_chat/llama3.2",
+            "openai_compatible_api_base": "https://compat.example.com/v1",
+            "openai_compatible_api_key": "compat-secret",
+            "edenai_api_base": "https://api.edenai.run/v2/llm",
+            "edenai_api_key": "eden-secret",
+            "ollama_api_base": "https://ollama.example.com",
+            "ollama_basic_auth_username": "adminuser",
+            "ollama_basic_auth_password": "adminpassword",
+        }
+    )
+    assert form.is_valid(), form.errors
+    cfg = form.save()
+
+    assert cfg.get_provider_settings("openai_compatible") == {
+        "api_base": "https://compat.example.com/v1",
+        "api_key": "compat-secret",
+    }
+    assert cfg.get_provider_settings("edenai") == {
+        "api_base": "https://api.edenai.run/v2/llm",
+        "api_key": "eden-secret",
+    }
+    assert cfg.get_provider_settings("ollama") == {
+        "api_base": "https://ollama.example.com",
+        "basic_auth": {"username": "adminuser", "password": "adminpassword"},
+    }
+
+    # Re-saving with blank secret fields preserves existing encrypted secrets
+    form2 = TenantProviderConfigAdminForm(
+        instance=cfg,
+        data={
+            "tenant": str(tenant.id),
+            "default_extraction_model": "edenai/openai/gpt-4o-mini",
+            "default_synthesis_model": "ollama_chat/llama3.2",
+            "openai_compatible_api_base": "https://compat.example.com/v1",
+            "openai_compatible_api_key": "",
+            "edenai_api_base": "https://api.edenai.run/v2/llm",
+            "edenai_api_key": "",
+            "ollama_api_base": "https://ollama.example.com",
+            "ollama_basic_auth_username": "adminuser",
+            "ollama_basic_auth_password": "",
+        },
+    )
+    assert form2.is_valid(), form2.errors
+    cfg2 = form2.save()
+    assert cfg2.get_provider_settings("edenai")["api_key"] == "eden-secret"
+    assert cfg2.get_provider_settings("ollama")["basic_auth"]["password"] == "adminpassword"
+

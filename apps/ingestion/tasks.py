@@ -49,6 +49,15 @@ def dispatch_index_only(document_id: str) -> None:
     index_document_task.apply_async(args=[document_id], queue="indexing")
 
 
+def run_ingestion_pipeline_sync(document_id: str) -> str | None:
+    """Execute parse -> validate_and_extract -> index synchronously in-process (for Admin debugging)."""
+    parsed_id = parse_document_task.run(document_id)
+    validated_id = validate_and_extract_task.run(parsed_id)
+    if validated_id is None:
+        return None
+    return index_document_task.run(validated_id)
+
+
 @shared_task(bind=True, max_retries=2, default_retry_delay=5)
 def parse_document_task(self: Any, document_id: str) -> str:
     doc = Document.objects.select_related("tenant", "topic").get(id=document_id)
