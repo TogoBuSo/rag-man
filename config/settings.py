@@ -98,7 +98,7 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 LANGUAGE_CODE = "en-us"
-TIME_ZONE = "UTC"
+TIME_ZONE = os.environ.get("DJANGO_TIME_ZONE", "Africa/Johannesburg")
 USE_I18N = True
 USE_TZ = True
 
@@ -160,7 +160,7 @@ CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://127.0.0
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
-CELERY_TIMEZONE = "UTC"
+CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_ALWAYS_EAGER = os.environ.get("CELERY_TASK_ALWAYS_EAGER", "false").lower() in (
     "1",
@@ -176,6 +176,7 @@ DEFAULT_EMBEDDING_API_KEY = os.environ.get("DEFAULT_EMBEDDING_API_KEY", "")
 DEFAULT_EXTRACTION_MODEL = os.environ.get("DEFAULT_EXTRACTION_MODEL", "gpt-4o-mini")
 DEFAULT_SYNTHESIS_MODEL = os.environ.get("DEFAULT_SYNTHESIS_MODEL", "gpt-4o-mini")
 DEFAULT_RERANK_MODEL = os.environ.get("DEFAULT_RERANK_MODEL", "cohere/rerank-english-v3.0")
+LLM_REQUEST_TIMEOUT = float(os.environ.get("LLM_REQUEST_TIMEOUT", "60"))
 
 # Optional provider defaults (set real keys/endpoints in .env only)
 LLM_PROVIDERS = {

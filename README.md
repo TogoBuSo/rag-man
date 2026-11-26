@@ -126,6 +126,7 @@ Authenticate requests with either `Authorization: Bearer <api_key>` or `X-API-Ke
 | | `GET /api/v1/topics` | List active Topics for the authenticated tenant |
 | | `PATCH /api/v1/topics/{topic_id}` | Update Topic context; auto-bumps `schema_version` on schema change |
 | **Ingestion** | `POST /api/v1/topics/{topic_id}/documents/upload` | Multipart file upload (`202 Accepted`, or `200 OK` if deduplicated) |
+| | `POST /api/v1/topics/{topic_id}/documents/text` | Multipart manual text (`title`, `content`, optional `attachments[]` ingested as child documents) |
 | | `POST /api/v1/topics/{topic_id}/documents/url` | Submit URL `{url, force_reindex}` (`202 Accepted`) |
 | | `GET /api/v1/documents/{document_id}` | Poll ingestion status, `extracted_metadata`, and `validation_report` |
 | | `DELETE /api/v1/documents/{document_id}` | Hard-delete document, chunks, and stored files |

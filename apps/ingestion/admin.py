@@ -11,6 +11,11 @@ from django.http import HttpRequest
 from django.utils.html import format_html
 
 from apps.ingestion.models import Document, DocumentChunk
+from apps.ingestion.services import (
+    collect_document_storage_keys,
+    create_file_document,
+    format_manual_text_markdown,
+)
 from apps.ingestion.storage import delete_key, save_bytes
 from apps.ingestion.tasks import (
     dispatch_index_only,
@@ -32,6 +37,24 @@ STATUS_COLORS: dict[str, str] = {
 }
 
 
+class MultipleFileInput(forms.ClearableFileInput):
+    allow_multiple_selected = True
+
+
+class MultipleFileField(forms.FileField):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("widget", MultipleFileInput())
+        super().__init__(*args, **kwargs)
+
+    def clean(self, data: Any, initial: Any = None) -> list[Any]:
+        single_clean = super().clean
+        if not data:
+            return []
+        if isinstance(data, (list, tuple)):
+            return [single_clean(item, initial) for item in data if item]
+        return [single_clean(data, initial)]
+
+
 class DocumentCreateAdminForm(forms.ModelForm):
     topic = forms.ModelChoiceField(
         queryset=Topic.objects.select_related("tenant").filter(is_active=True).order_by("tenant__name", "name"),
@@ -47,6 +70,23 @@ class DocumentCreateAdminForm(forms.ModelForm):
         assume_scheme="https",
         label="Web URL",
         help_text="Required when Source type is 'Web URL'.",
+    )
+    title = forms.CharField(
+        required=False,
+        max_length=255,
+        label="Title",
+        help_text="Required when Source type is 'Manual Text'.",
+    )
+    manual_text = forms.CharField(
+        required=False,
+        label="Manual Text Content",
+        widget=forms.Textarea(attrs={"rows": 12, "style": "width: 90%;"}),
+        help_text="Required when Source type is 'Manual Text'. Markdown is supported.",
+    )
+    attachments = MultipleFileField(
+        required=False,
+        label="Attachments (optional)",
+        help_text="Attach one or more files when Source type is 'Manual Text'. Each attachment is ingested as a separate child document.",
     )
     force_reindex = forms.BooleanField(
         required=False,
@@ -70,6 +110,9 @@ class DocumentCreateAdminForm(forms.ModelForm):
         source_type = cleaned.get("source_type")
         upload_file = cleaned.get("upload_file")
         source_url = (cleaned.get("source_url") or "").strip()
+        title = (cleaned.get("title") or "").strip()
+        manual_text = (cleaned.get("manual_text") or "").strip()
+        attachments = cleaned.get("attachments") or []
         force_reindex = bool(cleaned.get("force_reindex"))
 
         if source_type == Document.SourceType.FILE:
@@ -90,6 +133,25 @@ class DocumentCreateAdminForm(forms.ModelForm):
             cleaned["_raw_bytes"] = source_url.encode("utf-8")
             cleaned["_source_uri"] = source_url
             cleaned["_content_hash"] = content_hash
+        elif source_type == Document.SourceType.TEXT:
+            if not title:
+                self.add_error("title", "Please enter a title for the manual text submission.")
+            if not manual_text:
+                self.add_error("manual_text", "Please enter the text content to ingest.")
+            if not title or not manual_text:
+                return cleaned
+            formatted = format_manual_text_markdown(title, manual_text)
+            raw_bytes = formatted.encode("utf-8")
+            content_hash = hashlib.sha256(raw_bytes).hexdigest()
+            cleaned["_raw_bytes"] = raw_bytes
+            cleaned["_source_uri"] = title
+            cleaned["_content_hash"] = content_hash
+            attachment_payloads: list[tuple[str, bytes]] = []
+            for att in attachments:
+                att_bytes = att.read()
+                att.seek(0)
+                attachment_payloads.append((att.name or "attachment.bin", att_bytes))
+            cleaned["_attachments"] = attachment_payloads
 
         if topic and "_content_hash" in cleaned and not force_reindex:
             existing = (
@@ -120,6 +182,8 @@ class DocumentCreateAdminForm(forms.ModelForm):
         doc_id = uuid.uuid4()
         if source_type == Document.SourceType.FILE:
             raw_key = f"tenants/{topic.tenant_id}/topics/{topic.id}/documents/{doc_id}/raw/{source_uri}"
+        elif source_type == Document.SourceType.TEXT:
+            raw_key = f"tenants/{topic.tenant_id}/topics/{topic.id}/documents/{doc_id}/raw/submission.md"
         else:
             raw_key = f"tenants/{topic.tenant_id}/topics/{topic.id}/documents/{doc_id}/raw/url.txt"
 
@@ -139,6 +203,20 @@ class DocumentCreateAdminForm(forms.ModelForm):
         return doc
 
 
+class ChildDocumentInline(admin.TabularInline):
+    model = Document
+    fk_name = "parent_document"
+    verbose_name = "Child Attachment Document"
+    verbose_name_plural = "Child Attachment Documents"
+    extra = 0
+    can_delete = False
+    max_num = 0
+    fields = ("source_uri", "source_type", "status", "semantic_score", "created_at")
+    readonly_fields = ("source_uri", "source_type", "status", "semantic_score", "created_at")
+    show_change_link = True
+    ordering = ("created_at",)
+
+
 class DocumentChunkInline(admin.TabularInline):
     model = DocumentChunk
     extra = 0
@@ -156,12 +234,16 @@ class DocumentChunkInline(admin.TabularInline):
 
 @admin.register(Document)
 class DocumentAdmin(admin.ModelAdmin):
+    class Media:
+        js = ("ingestion/js/document_source_toggle.js",)
+
     list_display = (
         "short_id",
         "tenant",
         "topic",
         "source_type",
         "source_uri_short",
+        "parent_short",
         "status_badge",
         "semantic_score",
         "chunk_count",
@@ -173,6 +255,7 @@ class DocumentAdmin(admin.ModelAdmin):
         "id",
         "tenant",
         "topic",
+        "parent_document",
         "source_type",
         "source_uri",
         "raw_storage_key",
@@ -192,7 +275,7 @@ class DocumentAdmin(admin.ModelAdmin):
         return (
             super()
             .get_queryset(request)
-            .select_related("tenant", "topic")
+            .select_related("tenant", "topic", "parent_document")
             .annotate(_chunk_count=Count("chunks"))
         )
 
@@ -210,18 +293,42 @@ class DocumentAdmin(admin.ModelAdmin):
         if obj is None:
             return [
                 (
-                    "Ingest Document",
+                    "Target & Source Type",
                     {
                         "fields": (
                             "topic",
                             "source_type",
+                        )
+                    },
+                ),
+                (
+                    "File Upload / Web URL",
+                    {
+                        "fields": (
                             "upload_file",
                             "source_url",
+                        )
+                    },
+                ),
+                (
+                    "Manual Text Submission & Attachments",
+                    {
+                        "fields": (
+                            "title",
+                            "manual_text",
+                            "attachments",
+                        )
+                    },
+                ),
+                (
+                    "Execution Options",
+                    {
+                        "fields": (
                             "force_reindex",
                             "run_sync",
                         )
                     },
-                )
+                ),
             ]
         return [
             (
@@ -231,6 +338,7 @@ class DocumentAdmin(admin.ModelAdmin):
                         "id",
                         "tenant",
                         "topic",
+                        "parent_document",
                         "source_type",
                         "source_uri",
                         "status",
@@ -264,19 +372,40 @@ class DocumentAdmin(admin.ModelAdmin):
         ]
 
     def get_inlines(self, request: HttpRequest, obj: Document | None = None) -> list[type[admin.TabularInline]]:
-        return [DocumentChunkInline] if obj is not None else []
+        if obj is None:
+            return []
+        return [ChildDocumentInline, DocumentChunkInline]
 
     def save_model(self, request: HttpRequest, obj: Document, form: forms.ModelForm, change: bool) -> None:
         super().save_model(request, obj, form, change)
         if not change:
             run_sync = bool(form.cleaned_data.get("run_sync"))
+            force_reindex = bool(form.cleaned_data.get("force_reindex"))
+            attachment_payloads: list[tuple[str, bytes]] = form.cleaned_data.get("_attachments") or []
+
+            child_docs: list[Document] = []
+            for att_filename, att_bytes in attachment_payloads:
+                child_res = create_file_document(
+                    tenant=obj.tenant,
+                    topic=obj.topic,
+                    filename=att_filename,
+                    raw_bytes=att_bytes,
+                    force_reindex=force_reindex,
+                    parent_document=obj,
+                )
+                if not child_res.deduplicated:
+                    child_docs.append(child_res.document)
+
             if run_sync:
                 try:
                     run_ingestion_pipeline_sync(str(obj.id))
                     obj.refresh_from_db()
+                    for child in child_docs:
+                        run_ingestion_pipeline_sync(str(child.id))
+                    extra = f" (+ {len(child_docs)} child attachment(s))" if child_docs else ""
                     self.message_user(
                         request,
-                        f"Synchronous ingestion completed for {obj.id} — final status: {obj.status}.",
+                        f"Synchronous ingestion completed for {obj.id}{extra} — parent status: {obj.status}.",
                         level=messages.SUCCESS if obj.status == Document.Status.INDEXED else messages.WARNING,
                     )
                 except Exception as exc:
@@ -287,28 +416,36 @@ class DocumentAdmin(admin.ModelAdmin):
                     )
             else:
                 dispatch_ingestion_pipeline(str(obj.id))
+                for child in child_docs:
+                    dispatch_ingestion_pipeline(str(child.id))
+                extra = f" and {len(child_docs)} child attachment(s)" if child_docs else ""
                 self.message_user(
                     request,
-                    f"Queued ingestion pipeline for {obj.id} on Celery queues (parsing -> llm_io -> indexing).",
+                    f"Queued ingestion pipeline for {obj.id}{extra} on Celery queues (parsing -> llm_io -> indexing).",
                     level=messages.INFO,
                 )
 
     def delete_model(self, request: HttpRequest, obj: Document) -> None:
-        raw_key, norm_key = obj.raw_storage_key, obj.normalized_storage_key
+        keys = collect_document_storage_keys(obj)
         super().delete_model(request, obj)
-        delete_key(raw_key)
-        delete_key(norm_key)
+        for key in keys:
+            delete_key(key)
 
     def delete_queryset(self, request: HttpRequest, queryset: QuerySet[Document]) -> None:
-        keys = [(d.raw_storage_key, d.normalized_storage_key) for d in queryset]
+        keys: list[str] = []
+        for doc in queryset.prefetch_related("child_documents"):
+            keys.extend(collect_document_storage_keys(doc))
         super().delete_queryset(request, queryset)
-        for raw_key, norm_key in keys:
-            delete_key(raw_key)
-            delete_key(norm_key)
+        for key in keys:
+            delete_key(key)
 
     @admin.display(description="ID")
     def short_id(self, obj: Document) -> str:
         return str(obj.id)[:8]
+
+    @admin.display(description="Parent")
+    def parent_short(self, obj: Document) -> str:
+        return str(obj.parent_document_id)[:8] if obj.parent_document_id else "—"
 
     @admin.display(description="Source")
     def source_uri_short(self, obj: Document) -> str:

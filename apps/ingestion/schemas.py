@@ -5,6 +5,7 @@ from typing import Any
 from uuid import UUID
 
 from ninja import Schema
+from pydantic import Field
 
 
 class DocumentUrlIn(Schema):
@@ -18,9 +19,26 @@ class DocumentIntakeOut(Schema):
     deduplicated: bool = False
 
 
+class ManualTextIntakeOut(Schema):
+    document_id: UUID
+    status: str
+    deduplicated: bool = False
+    attachments: list[DocumentIntakeOut] = Field(default_factory=list)
+
+
+class ChildDocumentSummaryOut(Schema):
+    id: UUID
+    source_type: str
+    source_uri: str
+    status: str
+    semantic_score: float | None
+    created_at: datetime
+
+
 class DocumentOut(Schema):
     id: UUID
     topic_id: UUID
+    parent_document_id: UUID | None = None
     source_type: str
     source_uri: str
     content_hash: str
@@ -29,5 +47,6 @@ class DocumentOut(Schema):
     semantic_score: float | None
     extracted_metadata: dict[str, Any]
     validation_report: dict[str, Any]
+    child_documents: list[ChildDocumentSummaryOut] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime

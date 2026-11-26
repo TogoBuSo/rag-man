@@ -5,7 +5,7 @@ from typing import Any
 
 import jsonschema
 import litellm
-from celery import chain, shared_task
+from celery import Task, chain, shared_task
 from django.contrib.postgres.search import SearchVector
 from django.db import transaction
 
@@ -26,6 +26,19 @@ from apps.topics.models import Topic
 logger = logging.getLogger(__name__)
 
 EMBEDDING_BATCH_SIZE = 64
+
+
+class _IngestionTask(Task):
+    """Marks the Document as FAILED with error details when retries are exhausted."""
+
+    def on_failure(self, exc: Exception, task_id: str, args: tuple[Any, ...], kwargs: dict[str, Any], einfo: Any) -> None:
+        document_id = args[0] if args else kwargs.get("document_id")
+        if document_id:
+            Document.objects.filter(id=document_id).update(
+                status=Document.Status.FAILED,
+                validation_report={"stage": self.name, "error": str(exc)},
+            )
+        super().on_failure(exc, task_id, args, kwargs, einfo)
 
 
 def dispatch_ingestion_pipeline(document_id: str) -> None:
@@ -67,6 +80,12 @@ def parse_document_task(self: Any, document_id: str) -> str:
     try:
         if doc.source_type == Document.SourceType.URL:
             markdown_text = parse_url_to_markdown(doc.source_uri)
+        elif doc.source_type == Document.SourceType.TEXT:
+            local_path = get_local_path(doc.raw_storage_key)
+            if local_path is not None:
+                markdown_text = local_path.read_text(encoding="utf-8", errors="replace").strip()
+            else:
+                markdown_text = read_text(doc.raw_storage_key).strip()
         else:
             local_path = get_local_path(doc.raw_storage_key)
             if local_path is not None:
@@ -91,6 +110,7 @@ def parse_document_task(self: Any, document_id: str) -> str:
 
 @shared_task(
     bind=True,
+    base=_IngestionTask,
     autoretry_for=(litellm.RateLimitError, litellm.APIConnectionError, litellm.Timeout),
     retry_backoff=True,
     retry_jitter=True,
@@ -246,7 +266,7 @@ def validate_and_extract_task(self: Any, document_id: str | None) -> str | None:
     return None
 
 
-@shared_task(bind=True, max_retries=2, default_retry_delay=5)
+@shared_task(bind=True, base=_IngestionTask, max_retries=2, default_retry_delay=5)
 def index_document_task(self: Any, document_id: str | None) -> str | None:
     if not document_id:
         return None

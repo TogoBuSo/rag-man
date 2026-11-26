@@ -16,6 +16,7 @@ def test_openapi_schema_exposes_all_spec_endpoints() -> None:
         "/api/v1/topics",
         "/api/v1/topics/{topic_id}",
         "/api/v1/topics/{topic_id}/documents/upload",
+        "/api/v1/topics/{topic_id}/documents/text",
         "/api/v1/topics/{topic_id}/documents/url",
         "/api/v1/documents/{document_id}",
         "/api/v1/quarantine",

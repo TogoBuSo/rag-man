@@ -233,10 +233,9 @@ class LLMGatewayClient:
             "messages": messages,
             "temperature": 0.0,
             "response_format": {"type": "json_object"},
+            "timeout": float(getattr(settings, "LLM_REQUEST_TIMEOUT", 60.0)),
             **provider_kwargs,
         }
-        if response_schema:
-            kwargs["extra_body"] = {"metadata_schema": response_schema}
 
         response = litellm.completion(**kwargs)
         prompt_tokens, completion_tokens = _extract_usage(response)
@@ -266,6 +265,7 @@ class LLMGatewayClient:
             "model": litellm_model,
             "messages": messages,
             "temperature": 0.1,
+            "timeout": float(getattr(settings, "LLM_REQUEST_TIMEOUT", 60.0)),
             **provider_kwargs,
         }
 
@@ -298,6 +298,7 @@ class LLMGatewayClient:
             "messages": messages,
             "temperature": 0.1,
             "stream": True,
+            "timeout": float(getattr(settings, "LLM_REQUEST_TIMEOUT", 60.0)),
             **provider_kwargs,
         }
 
@@ -341,7 +342,12 @@ class LLMGatewayClient:
         litellm_model, provider_kwargs = resolve_provider_kwargs(
             tenant, configured_model, role="embedding"
         )
-        response = litellm.embedding(model=litellm_model, input=texts, **provider_kwargs)
+        response = litellm.embedding(
+            model=litellm_model,
+            input=texts,
+            timeout=float(getattr(settings, "LLM_REQUEST_TIMEOUT", 60.0)),
+            **provider_kwargs,
+        )
         prompt_tokens, _ = _extract_usage(response)
         _log_usage(
             tenant=tenant,

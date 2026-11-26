@@ -15,6 +15,7 @@ class Document(models.Model):
     class SourceType(models.TextChoices):
         FILE = "FILE", "File Upload"
         URL = "URL", "Web URL"
+        TEXT = "TEXT", "Manual Text"
 
     class Status(models.TextChoices):
         PENDING = "PENDING", "Pending"
@@ -29,6 +30,13 @@ class Document(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey("tenancy.Tenant", on_delete=models.CASCADE, db_index=True)
     topic = models.ForeignKey("topics.Topic", on_delete=models.CASCADE, related_name="documents")
+    parent_document = models.ForeignKey(
+        "self",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="child_documents",
+    )
 
     source_type = models.CharField(max_length=16, choices=SourceType.choices)
     source_uri = models.TextField()
@@ -53,6 +61,7 @@ class Document(models.Model):
         indexes = [
             models.Index(fields=["tenant", "topic", "content_hash"]),
             models.Index(fields=["tenant", "status"]),
+            models.Index(fields=["tenant", "parent_document"]),
         ]
 
     def __str__(self) -> str:
