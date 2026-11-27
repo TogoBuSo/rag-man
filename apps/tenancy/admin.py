@@ -3,7 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 from django import forms
-from django.contrib import admin
+from django.contrib import admin, messages
+from django.http import HttpRequest
+from django.utils.html import format_html
 
 from apps.tenancy.models import Tenant, TenantAPIKey, TenantProviderConfig
 
@@ -187,6 +189,63 @@ class TenantAPIKeyAdmin(admin.ModelAdmin):
     list_display = ("tenant", "name", "key_prefix", "is_active", "expires_at", "last_used_at")
     list_filter = ("is_active", "tenant")
     readonly_fields = ("key_prefix", "key_hash", "created_at", "last_used_at")
+
+    def get_fields(self, request: HttpRequest, obj: TenantAPIKey | None = None) -> list[str]:
+        if obj is None:
+            return ["tenant", "name", "is_active", "expires_at"]
+        return [
+            "tenant",
+            "name",
+            "key_prefix",
+            "key_hash",
+            "is_active",
+            "expires_at",
+            "created_at",
+            "last_used_at",
+        ]
+
+    def get_readonly_fields(
+        self, request: HttpRequest, obj: TenantAPIKey | None = None
+    ) -> tuple[str, ...]:
+        if obj is None:
+            return ()
+        return ("key_prefix", "key_hash", "created_at", "last_used_at")
+
+    def save_model(
+        self,
+        request: HttpRequest,
+        obj: TenantAPIKey,
+        form: forms.ModelForm,
+        change: bool,
+    ) -> None:
+        raw_key: str | None = None
+        if not change or not obj.key_hash:
+            raw_key = TenantAPIKey.generate_raw_key()
+            obj.key_prefix = raw_key[:12]
+            obj.key_hash = TenantAPIKey.hash_key(raw_key)
+        super().save_model(request, obj, form, change)
+        if raw_key is not None:
+            self.message_user(
+                request,
+                format_html(
+                    'API key created for <strong>{}</strong> ({}). '
+                    'Copy it now — it will not be shown again: '
+                    '<code id="new-tenant-api-key" style="user-select:all;padding:2px 6px;'
+                    'background:#fff;border:1px solid #ccc;border-radius:3px;">{}</code> '
+                    '<button type="button" class="button" style="margin-left:6px;padding:2px 8px;cursor:pointer;" '
+                    'onclick="(function(btn){{var k=document.getElementById(\'new-tenant-api-key\').textContent;'
+                    'if(navigator.clipboard&&navigator.clipboard.writeText){{'
+                    'navigator.clipboard.writeText(k).then(function(){{btn.textContent=\'Copied!\';}});}}'
+                    'else{{var r=document.createRange();r.selectNodeContents(document.getElementById(\'new-tenant-api-key\'));'
+                    'var s=window.getSelection();s.removeAllRanges();s.addRange(r);document.execCommand(\'copy\');'
+                    'btn.textContent=\'Copied!\';}}'
+                    '}})(this)">Copy key</button>',
+                    obj.tenant.slug,
+                    obj.name,
+                    raw_key,
+                ),
+                level=messages.WARNING,
+            )
 
 
 @admin.register(TenantProviderConfig)

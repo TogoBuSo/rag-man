@@ -47,6 +47,10 @@ class TenantAPIKey(models.Model):
         return f"{self.tenant.slug}:{self.name} ({self.key_prefix}...)"
 
     @staticmethod
+    def generate_raw_key() -> str:
+        return f"rag_{secrets.token_urlsafe(32)}"
+
+    @staticmethod
     def hash_key(raw_key: str) -> str:
         return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
@@ -57,7 +61,7 @@ class TenantAPIKey(models.Model):
         name: str = "default",
         expires_at: Any | None = None,
     ) -> tuple[TenantAPIKey, str]:
-        raw_key = f"rag_{secrets.token_urlsafe(32)}"
+        raw_key = cls.generate_raw_key()
         instance = cls.objects.create(
             tenant=tenant,
             name=name,
